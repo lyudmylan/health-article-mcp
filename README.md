@@ -1,88 +1,125 @@
 # AI Health Article Summarizer & Explainer
 
-A FastAPI-based service that fetches, summarizes, and explains health articles using OpenAI's GPT models.
+A FastAPI-based multi-agent system for processing and analyzing medical articles. The system fetches articles from URLs, generates summaries, explains medical terminology, and assesses study quality.
 
 ## Features
 
-- Fetches health articles from various medical sources (Harvard Health, NEJM, CDC, Mayo Clinic, etc.)
-- Summarizes articles using OpenAI's GPT models
-- Handles different types of medical content (research papers, news, guidelines, medical advice)
-- Provides consistent and reliable summaries
-- Error handling for various scenarios (404s, invalid URLs, etc.)
+- **Article Fetching**: Extracts content from medical articles and research papers
+- **Smart Summarization**: Generates concise, accurate summaries of medical content
+- **Terminology Explanation**: Identifies and explains medical terms in layperson-friendly language
+- **Quality Assessment**: Evaluates study quality based on methodology, sample size, statistical rigor, and more
+- **Multi-Agent Architecture**: Coordinated processing through specialized agents
 
-## Setup
+## Installation
 
-1. Create a virtual environment:
+1. Clone the repository:
+```bash
+git clone https://github.com/lyudmylan/health-article-mcp.git
+cd health-article-mcp
+```
+
+2. Create and activate a virtual environment:
 ```bash
 python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 ```
 
-2. Install dependencies:
+3. Install dependencies:
 ```bash
 pip install -r requirements.txt
 ```
 
-3. Set up environment variables:
+4. Set up your OpenAI API key:
 ```bash
-export OPENAI_API_KEY=your_api_key_here
+export OPENAI_API_KEY='your-api-key-here'
 ```
 
-## Running the Service
+## Usage
 
-Start the FastAPI server:
+1. Start the server:
 ```bash
-uvicorn main:app --reload
+python main.py
 ```
 
-The API will be available at `http://localhost:8000`
+2. Send a POST request to process an article:
+```bash
+curl -X POST http://localhost:8000/workflow/process \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message_id": "123e4567-e89b-12d3-a456-426614174000",
+    "conversation_id": "123e4567-e89b-12d3-a456-426614174001",
+    "sender_agent": "UserAgent",
+    "recipient_agent": "ArticleFetcherAgent",
+    "payload_type": "url",
+    "payload": {
+      "url": "https://example.com/medical-article"
+    }
+  }'
+```
+
+## API Response
+
+The API returns a JSON response with:
+- Article summary
+- Explained medical terminology
+- Quality assessment metrics including:
+  - Study design evaluation
+  - Sample quality analysis
+  - Statistical rigor assessment
+  - Bias evaluation
+  - Evidence level classification
+  - Overall quality score
+  - Key limitations and recommendations
+
+Example response:
+```json
+{
+  "success": true,
+  "message": "Article processed successfully",
+  "data": {
+    "message_id": "123e4567-e89b-12d3-a456-426614174002",
+    "summary": "Comprehensive summary of the article...",
+    "terminology": {
+      "Term 1": "Definition in simple language",
+      "Term 2": "Another explanation..."
+    },
+    "quality_assessment": {
+      "study_design": {
+        "rating": "4",
+        "explanation": "Well-designed cohort study"
+      },
+      "overall_score": {
+        "rating": "4.2",
+        "explanation": "High-quality study with minor limitations"
+      },
+      "key_limitations": [
+        "Limited follow-up period",
+        "Potential selection bias"
+      ],
+      "recommendations": [
+        "Consider longer follow-up study",
+        "Expand demographic diversity"
+      ]
+    }
+  }
+}
+```
 
 ## Testing
 
-Run the tests using pytest:
+Run the test suite:
 ```bash
 TESTING=1 PYTHONPATH=. pytest tests/ -v
 ```
 
-## API Endpoints
+## Contributing
 
-### POST /workflow/process
+1. Fork the repository
+2. Create your feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add some amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
 
-Process a health article URL and return a summary.
+## License
 
-Request body:
-```json
-{
-    "message_id": "uuid",
-    "conversation_id": "uuid",
-    "sender_agent": "UserAgent",
-    "recipient_agent": "ArticleFetcherAgent",
-    "timestamp": "2024-03-15T10:00:00Z",
-    "payload_type": "url",
-    "payload": {
-        "url": "https://example.com/health-article"
-    }
-}
-```
-
-Response:
-```json
-{
-    "success": true,
-    "message": "Article processed successfully",
-    "data": {
-        "message_id": "uuid",
-        "summary": "Article summary..."
-    }
-}
-```
-
-## Error Handling
-
-The service handles various error cases:
-- Invalid URLs
-- Non-existent articles (404)
-- Invalid request formats
-- Server errors
-
-Each error returns an appropriate HTTP status code and descriptive message. 
+This project is licensed under the MIT License - see the LICENSE file for details. 

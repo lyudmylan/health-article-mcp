@@ -212,4 +212,122 @@ def test_summarizer_different_content_types(client, test_urls):
             elif content_type == "health_news":
                 assert any(term in summary.lower() for term in ["cdc", "guidelines", "recommendations"])
             elif content_type == "medical_advice":
-                assert any(term in summary.lower() for term in ["recommend", "advice", "should", "can"]) 
+                assert any(term in summary.lower() for term in ["recommend", "advice", "should", "can"])
+
+def test_process_workflow_with_terminology(client, test_urls):
+    """Test that the workflow processes terminology correctly"""
+    url = test_urls["clinical_trial"]
+    message_id = str(uuid4())
+    conversation_id = str(uuid4())
+    
+    response = client.post(
+        "/workflow/process",
+        json={
+            "message_id": message_id,
+            "conversation_id": conversation_id,
+            "sender_agent": "UserAgent",
+            "recipient_agent": "ArticleFetcherAgent",
+            "payload_type": "url",
+            "payload": {"url": url}
+        }
+    )
+    
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert "terminology" in data
+    terminology = data["terminology"]
+    assert isinstance(terminology, dict)
+    assert len(terminology) > 0
+    assert all(isinstance(k, str) and isinstance(v, str) for k, v in terminology.items())
+
+def test_process_workflow_with_quality_assessment(client, test_urls):
+    """Test that the workflow processes quality assessment correctly"""
+    url = test_urls["clinical_trial"]
+    message_id = str(uuid4())
+    conversation_id = str(uuid4())
+    
+    response = client.post(
+        "/workflow/process",
+        json={
+            "message_id": message_id,
+            "conversation_id": conversation_id,
+            "sender_agent": "UserAgent",
+            "recipient_agent": "ArticleFetcherAgent",
+            "payload_type": "url",
+            "payload": {"url": url}
+        }
+    )
+    
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert "quality_assessment" in data
+    assessment = data["quality_assessment"]
+    assert isinstance(assessment, dict)
+    
+    # Check required fields
+    required_fields = [
+        "study_design", "sample_quality", "statistical_rigor",
+        "bias_assessment", "transparency", "evidence_level",
+        "overall_score", "key_limitations", "recommendations"
+    ]
+    for field in required_fields:
+        assert field in assessment
+    
+    # Check rating fields
+    rating_fields = [
+        "study_design", "sample_quality", "statistical_rigor",
+        "bias_assessment", "transparency", "overall_score"
+    ]
+    for field in rating_fields:
+        assert "rating" in assessment[field]
+        assert "explanation" in assessment[field]
+    
+    # Check evidence level
+    assert "level" in assessment["evidence_level"]
+    assert "explanation" in assessment["evidence_level"]
+    
+    # Check lists
+    assert isinstance(assessment["key_limitations"], list)
+    assert isinstance(assessment["recommendations"], list)
+
+def test_full_workflow_integration(client, test_urls):
+    """Test that all components of the workflow work together"""
+    url = test_urls["clinical_trial"]
+    message_id = str(uuid4())
+    conversation_id = str(uuid4())
+    
+    response = client.post(
+        "/workflow/process",
+        json={
+            "message_id": message_id,
+            "conversation_id": conversation_id,
+            "sender_agent": "UserAgent",
+            "recipient_agent": "ArticleFetcherAgent",
+            "payload_type": "url",
+            "payload": {"url": url}
+        }
+    )
+    
+    assert response.status_code == 200
+    data = response.json()["data"]
+    
+    # Check all components are present
+    assert "message_id" in data
+    assert "summary" in data
+    assert "terminology" in data
+    assert "quality_assessment" in data
+    
+    # Check summary
+    assert isinstance(data["summary"], str)
+    assert len(data["summary"]) > 0
+    
+    # Check terminology
+    assert isinstance(data["terminology"], dict)
+    assert len(data["terminology"]) > 0
+    
+    # Check quality assessment
+    assessment = data["quality_assessment"]
+    assert isinstance(assessment, dict)
+    assert "overall_score" in assessment
+    assert "key_limitations" in assessment
+    assert "recommendations" in assessment 

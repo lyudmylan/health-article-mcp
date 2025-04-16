@@ -3,7 +3,7 @@ import os
 import logging
 from openai import OpenAI
 from mcp_models import MCPMessage, WorkflowResponse
-from agents import fetch_article, summarize_text, ArticleFetchError
+from agents import fetch_article, summarize_text, explain_terminology, assess_study_quality, ArticleFetchError
 from uuid import uuid4
 
 # Set up logging
@@ -74,6 +74,36 @@ async def process_article_text(message: MCPMessage) -> MCPMessage:
         logger.error(f"Error in process_article_text: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
+async def process_terminology(message: MCPMessage) -> MCPMessage:
+    """Handle terminology explanation by the Terminology Explainer agent"""
+    try:
+        terminology_dict = explain_terminology(message.payload["text"], app.state.openai_client)
+        return create_mcp_message(
+            conversation_id=message.conversation_id,
+            sender_agent="TerminologyExplainerAgent",
+            recipient_agent="ResponseFormatterAgent",
+            payload_type="terminology",
+            payload={"terminology": terminology_dict}
+        )
+    except Exception as e:
+        logger.error(f"Error in process_terminology: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+async def process_quality_assessment(message: MCPMessage) -> MCPMessage:
+    """Handle study quality assessment by the Quality Assessor agent"""
+    try:
+        quality_assessment = assess_study_quality(message.payload["text"], app.state.openai_client)
+        return create_mcp_message(
+            conversation_id=message.conversation_id,
+            sender_agent="QualityAssessorAgent",
+            recipient_agent="ResponseFormatterAgent",
+            payload_type="quality_assessment",
+            payload={"assessment": quality_assessment}
+        )
+    except Exception as e:
+        logger.error(f"Error in process_quality_assessment: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/workflow/process", response_model=WorkflowResponse)
 async def process_workflow(message: MCPMessage) -> WorkflowResponse:
     try:
@@ -93,13 +123,21 @@ async def process_workflow(message: MCPMessage) -> WorkflowResponse:
         # Second step: Generate summary
         summarizer_result = await process_article_text(fetcher_result)
         
-        # Return the summary as the final result
+        # Third step: Explain terminology
+        terminology_result = await process_terminology(fetcher_result)
+        
+        # Fourth step: Assess study quality
+        quality_result = await process_quality_assessment(fetcher_result)
+        
+        # Return the combined results
         return WorkflowResponse(
             success=True,
             message="Article processed successfully",
             data={
                 "message_id": str(summarizer_result.message_id),
-                "summary": summarizer_result.payload["summary"]
+                "summary": summarizer_result.payload["summary"],
+                "terminology": terminology_result.payload["terminology"],
+                "quality_assessment": quality_result.payload["assessment"]
             }
         )
             

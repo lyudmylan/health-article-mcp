@@ -94,4 +94,91 @@ Format your response in a clear, structured way."""
         return response.choices[0].message.content.strip()
         
     except Exception as e:
-        raise Exception(f"Error generating summary: {str(e)}") 
+        raise Exception(f"Error generating summary: {str(e)}")
+
+def explain_terminology(text: str, openai_client: OpenAI) -> dict:
+    """
+    Identifies and explains medical terminology from the provided text.
+    
+    Args:
+        text (str): The text containing medical terms to explain
+        openai_client (OpenAI): Initialized OpenAI client
+        
+    Returns:
+        dict: A dictionary containing terms and their explanations
+    """
+    try:
+        system_message = """You are a medical terminology expert. Your task is to:
+1. Identify important medical terms, abbreviations, and concepts from the text
+2. Provide clear, layperson-friendly explanations for each term
+3. Focus on terms that are crucial for understanding the content
+4. Include brief context for why each term is important
+5. Organize terms alphabetically
+
+Return the response as a JSON object where keys are medical terms and values are their explanations."""
+
+        response = openai_client.chat.completions.create(
+            model="gpt-4-turbo-preview",
+            messages=[
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": f"Please identify and explain medical terminology from this text:\n\n{text}"}
+            ],
+            temperature=0.3,
+            max_tokens=1500,
+            response_format={ "type": "json_object" }
+        )
+        
+        return eval(response.choices[0].message.content.strip())
+        
+    except Exception as e:
+        raise Exception(f"Error explaining terminology: {str(e)}")
+
+def assess_study_quality(text: str, openai_client: OpenAI) -> dict:
+    """
+    Assesses the quality and reliability of the medical study or article.
+    
+    Args:
+        text (str): The text of the study to assess
+        openai_client (OpenAI): Initialized OpenAI client
+        
+    Returns:
+        dict: A dictionary containing quality assessment metrics and explanations
+    """
+    try:
+        system_message = """You are a medical research methodology expert. Your task is to assess the quality of the study by evaluating:
+1. Study Design and Methodology
+2. Sample Size and Population
+3. Statistical Analysis and Significance
+4. Potential Biases and Limitations
+5. Funding Sources and Conflicts of Interest
+6. Peer Review Status
+7. Evidence Level (based on standard evidence hierarchies)
+
+Return the assessment as a JSON object with the following structure:
+{
+    "study_design": {"rating": "1-5", "explanation": "..."},
+    "sample_quality": {"rating": "1-5", "explanation": "..."},
+    "statistical_rigor": {"rating": "1-5", "explanation": "..."},
+    "bias_assessment": {"rating": "1-5", "explanation": "..."},
+    "transparency": {"rating": "1-5", "explanation": "..."},
+    "evidence_level": {"level": "I-V", "explanation": "..."},
+    "overall_score": {"rating": "1-5", "explanation": "..."},
+    "key_limitations": ["limitation1", "limitation2", "..."],
+    "recommendations": ["recommendation1", "recommendation2", "..."]
+}"""
+
+        response = openai_client.chat.completions.create(
+            model="gpt-4-turbo-preview",
+            messages=[
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": f"Please assess the quality of this medical study:\n\n{text}"}
+            ],
+            temperature=0.3,
+            max_tokens=2000,
+            response_format={ "type": "json_object" }
+        )
+        
+        return eval(response.choices[0].message.content.strip())
+        
+    except Exception as e:
+        raise Exception(f"Error assessing study quality: {str(e)}") 

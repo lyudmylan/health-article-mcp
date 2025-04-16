@@ -3,6 +3,7 @@ from fastapi.testclient import TestClient
 from unittest.mock import MagicMock
 from main import app
 from typing import Dict
+import json
 
 class MockResponse:
     def __init__(self, content):
@@ -21,6 +22,53 @@ def get_mock_summary(text):
     else:
         return "Test article summary"
 
+def get_mock_terminology(text):
+    """Generate consistent mock terminology explanations based on input text"""
+    if "exercise" in text.lower() and "heart disease" in text.lower():
+        return {
+            "Cardiovascular": "Relating to the heart and blood vessels",
+            "Exercise tolerance": "The ability to perform physical activity without undue fatigue",
+            "Myocardial infarction": "Heart attack; damage to heart muscle from blocked blood flow"
+        }
+    elif "trial" in text.lower() and "drug" in text.lower():
+        return {
+            "Clinical trial": "A research study testing medical treatments on human participants",
+            "Placebo": "An inactive substance used as a control in testing",
+            "p-value": "Statistical measure indicating the significance of results"
+        }
+    else:
+        return {
+            "Test term 1": "Definition 1",
+            "Test term 2": "Definition 2"
+        }
+
+def get_mock_quality_assessment(text):
+    """Generate consistent mock quality assessments based on input text"""
+    if "trial" in text.lower() and "drug" in text.lower():
+        return {
+            "study_design": {"rating": "5", "explanation": "Well-designed randomized controlled trial"},
+            "sample_quality": {"rating": "4", "explanation": "Large, diverse sample size"},
+            "statistical_rigor": {"rating": "5", "explanation": "Robust statistical analysis"},
+            "bias_assessment": {"rating": "4", "explanation": "Minor selection bias noted"},
+            "transparency": {"rating": "5", "explanation": "Full disclosure of methods and funding"},
+            "evidence_level": {"level": "I", "explanation": "High-quality RCT"},
+            "overall_score": {"rating": "4.5", "explanation": "Strong study with minor limitations"},
+            "key_limitations": ["Some demographic groups underrepresented"],
+            "recommendations": ["Consider replication with broader population"]
+        }
+    else:
+        return {
+            "study_design": {"rating": "3", "explanation": "Standard observational study"},
+            "sample_quality": {"rating": "3", "explanation": "Moderate sample size"},
+            "statistical_rigor": {"rating": "3", "explanation": "Basic statistical analysis"},
+            "bias_assessment": {"rating": "3", "explanation": "Some potential biases noted"},
+            "transparency": {"rating": "3", "explanation": "Standard reporting"},
+            "evidence_level": {"level": "III", "explanation": "Observational study"},
+            "overall_score": {"rating": "3", "explanation": "Average quality study"},
+            "key_limitations": ["Limited sample size", "Potential confounding factors"],
+            "recommendations": ["Further research needed", "Consider RCT design"]
+        }
+
 @pytest.fixture
 def mock_openai():
     """Mock OpenAI client with content-aware responses"""
@@ -29,9 +77,17 @@ def mock_openai():
     def mock_create(**kwargs):
         messages = kwargs.get('messages', [])
         user_message = next((m for m in messages if m['role'] == 'user'), None)
-        if user_message:
+        system_message = next((m for m in messages if m['role'] == 'system'), None)
+        
+        if not user_message:
+            return MockResponse("Test response")
+            
+        if "terminology" in system_message.get('content', '').lower():
+            return MockResponse(json.dumps(get_mock_terminology(user_message['content'])))
+        elif "quality" in system_message.get('content', '').lower():
+            return MockResponse(json.dumps(get_mock_quality_assessment(user_message['content'])))
+        else:
             return MockResponse(get_mock_summary(user_message['content']))
-        return MockResponse("Test article summary")
     
     mock.chat.completions.create = mock_create
     return mock
