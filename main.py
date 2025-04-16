@@ -1,9 +1,11 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 import os
 import logging
 from openai import OpenAI
 from mcp_models import MCPMessage, WorkflowResponse
 from agents import fetch_article, summarize_text, explain_terminology, assess_study_quality, ArticleFetchError
+from error_handlers import retry_with_backoff, validate_url, handle_api_error, RetryableError, NetworkError
+from rate_limiter import rate_limit, cached
 from uuid import uuid4
 
 # Set up logging
@@ -25,6 +27,13 @@ if not api_key and not os.getenv("TESTING"):
 openai_client = OpenAI(api_key=api_key or "test-key")
 app.state.openai_client = openai_client
 
+# Configure rate limits
+RATE_LIMIT_MAX_REQUESTS = int(os.getenv("RATE_LIMIT_MAX_REQUESTS", "60"))
+RATE_LIMIT_WINDOW = int(os.getenv("RATE_LIMIT_WINDOW", "60"))
+
+# Configure cache TTL (in seconds)
+CACHE_TTL = int(os.getenv("CACHE_TTL", "3600"))  # 1 hour default
+
 def create_mcp_message(
     conversation_id: str,
     sender_agent: str,
@@ -41,10 +50,19 @@ def create_mcp_message(
         payload=payload
     )
 
+@retry_with_backoff(
+    max_retries=3,
+    retryable_exceptions=(RetryableError, NetworkError)
+)
+@cached(ttl=CACHE_TTL)
 async def process_url(message: MCPMessage) -> MCPMessage:
     """Handle URL processing by the ArticleFetcher agent"""
     try:
-        article_text = fetch_article(message.payload["url"])
+        # Validate URL before processing
+        url = message.payload["url"]
+        validate_url(url)
+        
+        article_text = fetch_article(url)
         return create_mcp_message(
             conversation_id=message.conversation_id,
             sender_agent="ArticleFetcherAgent",
@@ -54,10 +72,14 @@ async def process_url(message: MCPMessage) -> MCPMessage:
         )
     except ArticleFetchError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Error in process_url: {str(e)}")
-        raise
+        raise NetworkError(str(e))
 
+@retry_with_backoff(max_retries=2)
+@cached(ttl=CACHE_TTL)
 async def process_article_text(message: MCPMessage) -> MCPMessage:
     """Handle article text processing by the Summarizer agent"""
     try:
@@ -72,8 +94,10 @@ async def process_article_text(message: MCPMessage) -> MCPMessage:
         )
     except Exception as e:
         logger.error(f"Error in process_article_text: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise RetryableError(str(e))
 
+@retry_with_backoff(max_retries=2)
+@cached(ttl=CACHE_TTL)
 async def process_terminology(message: MCPMessage) -> MCPMessage:
     """Handle terminology explanation by the Terminology Explainer agent"""
     try:
@@ -87,8 +111,10 @@ async def process_terminology(message: MCPMessage) -> MCPMessage:
         )
     except Exception as e:
         logger.error(f"Error in process_terminology: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise RetryableError(str(e))
 
+@retry_with_backoff(max_retries=2)
+@cached(ttl=CACHE_TTL)
 async def process_quality_assessment(message: MCPMessage) -> MCPMessage:
     """Handle study quality assessment by the Quality Assessor agent"""
     try:
@@ -102,10 +128,11 @@ async def process_quality_assessment(message: MCPMessage) -> MCPMessage:
         )
     except Exception as e:
         logger.error(f"Error in process_quality_assessment: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise RetryableError(str(e))
 
 @app.post("/workflow/process", response_model=WorkflowResponse)
-async def process_workflow(message: MCPMessage) -> WorkflowResponse:
+@rate_limit(max_requests=RATE_LIMIT_MAX_REQUESTS, time_window=RATE_LIMIT_WINDOW)
+async def process_workflow(request: Request, message: MCPMessage) -> WorkflowResponse:
     try:
         # Log received message
         logger.info(f"Received message: {message.model_dump_json(indent=2)}")
@@ -141,12 +168,8 @@ async def process_workflow(message: MCPMessage) -> WorkflowResponse:
             }
         )
             
-    except HTTPException as e:
-        logger.error(f"Error in workflow processing: {str(e)}")
-        raise e
     except Exception as e:
-        logger.error(f"Unexpected error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise handle_api_error(e)
 
 if __name__ == "__main__":
     import uvicorn

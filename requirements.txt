@@ -1,5 +1,12 @@
-fastapi>=0.109.0
-uvicorn>=0.27.0
-openai>=1.12.0
-pytest>=8.0.0
-httpx>=0.26.0  # Required for FastAPI TestClient 
+fastapi==0.110.0
+uvicorn==0.27.1
+openai==1.12.0
+python-dotenv==1.0.1
+beautifulsoup4==4.12.3
+requests==2.31.0
+pytest==8.0.2
+pytest-asyncio==0.23.5
+httpx==0.27.0
+validators==0.22.0
+aioredis==2.0.1
+redis==5.0.1 

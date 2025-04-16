@@ -9,6 +9,16 @@ A FastAPI-based multi-agent system for processing and analyzing medical articles
 - **Terminology Explanation**: Identifies and explains medical terms in layperson-friendly language
 - **Quality Assessment**: Evaluates study quality based on methodology, sample size, statistical rigor, and more
 - **Multi-Agent Architecture**: Coordinated processing through specialized agents
+- **Error Handling & Retry Logic**: Robust error handling with exponential backoff retry mechanism
+- **Rate Limiting**: Prevents API abuse with configurable rate limits
+- **Response Caching**: Improves performance by caching responses
+- **URL Validation**: Ensures only valid medical/academic URLs are processed
+
+## Requirements
+
+- Python 3.9+
+- Redis server (for rate limiting and caching)
+- OpenAI API key
 
 ## Installation
 
@@ -29,9 +39,24 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-4. Set up your OpenAI API key:
+4. Install and start Redis server:
+```bash
+# On macOS using Homebrew
+brew install redis
+brew services start redis
+
+# On Ubuntu/Debian
+sudo apt-get install redis-server
+sudo systemctl start redis-server
+```
+
+5. Set up environment variables:
 ```bash
 export OPENAI_API_KEY='your-api-key-here'
+export REDIS_URL='redis://localhost'  # Optional: default is localhost
+export RATE_LIMIT_MAX_REQUESTS='60'   # Optional: requests per window
+export RATE_LIMIT_WINDOW='60'         # Optional: window in seconds
+export CACHE_TTL='3600'              # Optional: cache TTL in seconds
 ```
 
 ## Usage
@@ -104,6 +129,41 @@ Example response:
   }
 }
 ```
+
+## Error Handling
+
+The API includes comprehensive error handling:
+- Input validation errors (400)
+- Rate limiting errors (429)
+- Network errors (503)
+- Server errors (500)
+
+Each error response includes a descriptive message and appropriate HTTP status code.
+
+## Rate Limiting
+
+The API implements rate limiting to prevent abuse:
+- Default: 60 requests per minute per IP
+- Configurable via environment variables
+- Uses Redis for distributed rate limiting
+- Returns 429 status code when limit exceeded
+
+## Caching
+
+Response caching improves performance:
+- Default TTL: 1 hour
+- Configurable via environment variables
+- Uses Redis for distributed caching
+- Automatic cache invalidation
+- Cache keys based on request parameters
+
+## URL Validation
+
+The API validates URLs before processing:
+- Ensures HTTPS/HTTP protocol
+- Validates against whitelist of medical/academic domains
+- Checks for malicious patterns
+- Returns detailed validation errors
 
 ## Testing
 
