@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Callable
 import time
 from datetime import datetime, timedelta
 import logging
@@ -8,6 +8,7 @@ import json
 from fastapi import Request
 import aioredis
 import hashlib
+import redis.asyncio as redis
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -16,73 +17,65 @@ logger = logging.getLogger(__name__)
 class RateLimiter:
     """Rate limiter using a token bucket algorithm"""
     
-    def __init__(
-        self,
-        redis_url: str = "redis://localhost",
-        max_requests: int = 60,
-        time_window: int = 60,  # in seconds
-        redis_prefix: str = "rate_limit:"
-    ):
-        self.redis_url = redis_url
-        self.max_requests = max_requests
-        self.time_window = time_window
-        self.redis_prefix = redis_prefix
-        self._redis: Optional[aioredis.Redis] = None
-    
-    async def init_redis(self):
-        """Initialize Redis connection"""
-        if self._redis is None:
-            self._redis = await aioredis.from_url(self.redis_url)
-    
-    async def close(self):
-        """Close Redis connection"""
-        if self._redis is not None:
-            await self._redis.close()
-            self._redis = None
-    
-    def get_key(self, identifier: str) -> str:
-        """Get Redis key for rate limiting"""
-        return f"{self.redis_prefix}{identifier}"
-    
-    async def is_rate_limited(self, identifier: str) -> bool:
+    def __init__(self, redis_url: str, max_requests: int = 60, time_window: int = 60):
         """
-        Check if the request should be rate limited.
+        Initialize the rate limiter.
         
         Args:
-            identifier: Unique identifier for the client (e.g., IP address)
+            redis_url: Redis connection URL
+            max_requests: Maximum number of requests allowed in the time window
+            time_window: Time window in seconds
+        """
+        self.redis_client = redis.from_url(redis_url)
+        self.max_requests = max_requests
+        self.time_window = time_window
+
+    async def _cleanup_old_requests(self, key: str) -> None:
+        """Remove requests older than the time window."""
+        current_time = time.time()
+        min_time = current_time - self.time_window
+        await self.redis_client.zremrangebyscore(key, 0, min_time)
+
+    async def check_rate_limit(self, client_id: str) -> bool:
+        """
+        Check if the client has exceeded their rate limit.
+        
+        Args:
+            client_id: Unique identifier for the client (e.g., IP address)
             
         Returns:
-            bool: True if rate limited, False otherwise
+            bool: True if the request is allowed, False otherwise
             
         Raises:
             RateLimitError: If rate limit is exceeded
         """
-        await self.init_redis()
-        key = self.get_key(identifier)
+        key = f"rate_limit:{client_id}"
+        current_time = time.time()
         
-        async with self._redis.pipeline() as pipe:
-            now = int(time.time())
-            window_start = now - self.time_window
-            
+        # Use Redis pipeline for atomic operations
+        async with self.redis_client.pipeline() as pipe:
             # Remove old requests
-            await pipe.zremrangebyscore(key, 0, window_start)
-            # Count recent requests
-            recent_requests = await pipe.zcount(key, window_start, now)
+            await self._cleanup_old_requests(key)
             
-            if recent_requests >= self.max_requests:
-                ttl = await self._redis.ttl(key)
-                raise RateLimitError(
-                    f"Rate limit exceeded. Try again in {ttl} seconds."
-                )
+            # Add current request timestamp
+            await pipe.zadd(key, {str(current_time): current_time})
             
-            # Add new request
-            await pipe.zadd(key, {str(now): now})
-            # Set expiry
+            # Get count of recent requests
+            request_count = await pipe.zcard(key)
+            
+            # Set expiry on the key
             await pipe.expire(key, self.time_window)
             
+            # Execute pipeline
             await pipe.execute()
+
+        if request_count > self.max_requests:
+            logger.warning(f"Rate limit exceeded for client {client_id}")
+            raise RateLimitError(
+                f"Rate limit exceeded. Maximum {self.max_requests} requests per {self.time_window} seconds."
+            )
         
-        return False
+        return True
 
 class Cache:
     """Caching implementation using Redis"""
@@ -145,59 +138,79 @@ class Cache:
         await self.init_redis()
         await self._redis.delete(self.get_cache_key(key))
 
-def cached(ttl: Optional[int] = None):
+def cached(ttl: int = 3600):
     """
-    Decorator for caching function results.
+    Decorator to cache function results in Redis.
     
     Args:
         ttl: Time to live in seconds for cached results
     """
-    def decorator(func):
+    def decorator(func: Callable) -> Callable:
         @wraps(func)
         async def wrapper(*args, **kwargs):
-            cache = Cache()
-            key = cache.generate_key(func.__name__, args, kwargs)
+            # Get request object
+            request = None
+            for arg in args:
+                if hasattr(arg, 'client'):
+                    request = arg
+                    break
             
-            # Try to get from cache
-            cached_value = await cache.get(key)
-            if cached_value is not None:
-                logger.info(f"Cache hit for key: {key}")
-                return json.loads(cached_value)
+            if not request:
+                return await func(*args, **kwargs)
             
-            # If not in cache, execute function
+            # Get Redis client from app state
+            redis_client = getattr(request.app.state, 'redis_client', None)
+            if not redis_client:
+                return await func(*args, **kwargs)
+            
+            # Create cache key from function name and arguments
+            cache_key = f"cache:{func.__name__}:{str(args)}:{str(kwargs)}"
+            
+            # Try to get cached result
+            cached_result = await redis_client.get(cache_key)
+            if cached_result:
+                return cached_result
+            
+            # Get fresh result
             result = await func(*args, **kwargs)
             
-            # Store in cache
-            await cache.set(key, result, ttl)
-            logger.info(f"Cached result for key: {key}")
+            # Cache the result
+            await redis_client.setex(cache_key, ttl, str(result))
             
             return result
+        
         return wrapper
+    
     return decorator
 
-def rate_limit(
-    max_requests: int = 60,
-    time_window: int = 60
-):
+def rate_limit(func: Callable) -> Callable:
     """
-    Decorator for rate limiting endpoints.
+    Decorator to apply rate limiting to a function.
+    Must be used with FastAPI dependency injection to get the request object.
+    """
+    @wraps(func)
+    async def wrapper(*args, **kwargs):
+        # Extract request object from kwargs
+        request = kwargs.get('request')
+        if not request:
+            for arg in args:
+                if hasattr(arg, 'client'):
+                    request = arg
+                    break
+        
+        if not request:
+            raise ValueError("Could not find request object")
+        
+        # Get rate limiter from app state
+        rate_limiter = getattr(request.app.state, 'rate_limiter', None)
+        if not rate_limiter:
+            logger.warning("Rate limiter not initialized in app state")
+            return await func(*args, **kwargs)
+        
+        # Check rate limit
+        client_id = request.client.host
+        await rate_limiter.check_rate_limit(client_id)
+        
+        return await func(*args, **kwargs)
     
-    Args:
-        max_requests: Maximum number of requests allowed in the time window
-        time_window: Time window in seconds
-    """
-    def decorator(func):
-        @wraps(func)
-        async def wrapper(request: Request, *args, **kwargs):
-            limiter = RateLimiter(
-                max_requests=max_requests,
-                time_window=time_window
-            )
-            
-            # Use client IP as identifier
-            client_ip = request.client.host
-            await limiter.is_rate_limited(client_ip)
-            
-            return await func(request, *args, **kwargs)
-        return wrapper
-    return decorator 
+    return wrapper 

@@ -1,176 +1,230 @@
-from fastapi import FastAPI, HTTPException, Request
-import os
 import logging
-from openai import OpenAI
-from mcp_models import MCPMessage, WorkflowResponse
-from agents import fetch_article, summarize_text, explain_terminology, assess_study_quality, ArticleFetchError
-from error_handlers import retry_with_backoff, validate_url, handle_api_error, RetryableError, NetworkError
-from rate_limiter import rate_limit, cached
-from uuid import uuid4
+import os
+import asyncio
+from typing import Optional, Dict, Any
+from fastapi import FastAPI, HTTPException, Request, Depends
+from pydantic import BaseModel, field_validator, model_validator
+from pydantic_settings import BaseSettings
+import aiohttp
+import json
+from openai import AsyncOpenAI
+from bs4 import BeautifulSoup
+import validators
+from functools import lru_cache
+import uuid
+from contextlib import asynccontextmanager
 
-# Set up logging
-logging.basicConfig(level=logging.INFO)
+# Custom exceptions
+class ArticleProcessingError(Exception):
+    """Base exception for article processing errors"""
+    pass
+
+class ArticleFetchError(ArticleProcessingError):
+    """Exception raised when fetching article fails"""
+    pass
+
+class ArticleAnalysisError(ArticleProcessingError):
+    """Exception raised when analyzing article fails"""
+    pass
+
+# Configuration
+class Settings(BaseSettings):
+    openai_api_key: str = "test-key" if os.getenv("TESTING") else os.getenv("OPENAI_API_KEY", "")
+    openai_model: str = "gpt-4"
+    request_timeout: int = 30
+    max_content_length: int = 100000
+    allowed_domains: list = [
+        "nejm.org",
+        "thelancet.com",
+        "jamanetwork.com",
+        "bmj.com",
+        "mayoclinic.org",
+        "health.harvard.edu"
+    ]
+
+    class Config:
+        env_file = ".env"
+
+@lru_cache
+def get_settings():
+    return Settings()
+
+# Models
+class ArticleRequest(BaseModel):
+    url: Optional[str] = None
+    text: Optional[str] = None
+
+    @field_validator('url')
+    @classmethod
+    def validate_url(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        if not validators.url(v):
+            raise ValueError("Invalid URL format")
+        
+        # Get settings without dependency injection
+        settings = get_settings()
+        
+        # Check domain allowlist
+        domain = v.split('/')[2] if len(v.split('/')) > 2 else ""
+        if not any(allowed in domain for allowed in settings.allowed_domains):
+            raise ValueError(f"Domain not allowed. Allowed domains: {', '.join(settings.allowed_domains)}")
+        
+        return v
+
+    @model_validator(mode='before')
+    @classmethod
+    def check_url_or_text(cls, values: Dict[str, Any]) -> Dict[str, Any]:
+        url = values.get('url')
+        text = values.get('text')
+        if not url and not text:
+            raise ValueError("Either url or text must be provided")
+        if url and text:
+            raise ValueError("Only one of url or text should be provided")
+        
+        # Check content length
+        if text and len(text) > get_settings().max_content_length:
+            raise ValueError(f"Text content exceeds maximum length of {get_settings().max_content_length} characters")
+        
+        return values
+
+# Services
+class ArticleService:
+    def __init__(self, settings: Settings = Depends(get_settings)):
+        self.settings = settings
+        self.openai_client = AsyncOpenAI(api_key=settings.openai_api_key)
+        timeout = aiohttp.ClientTimeout(total=settings.request_timeout)
+        self.session = aiohttp.ClientSession(timeout=timeout)
+
+    async def fetch_article(self, url: str) -> str:
+        try:
+            async with self.session.get(url) as response:
+                if response.status == 404:
+                    raise ArticleFetchError("Article not found")
+                response.raise_for_status()
+                html = await response.text()
+                soup = BeautifulSoup(html, 'html.parser')
+                text = soup.get_text()
+                if not text.strip():
+                    raise ArticleFetchError("No content found in article")
+                return text
+        except aiohttp.ClientError as e:
+            raise ArticleFetchError(f"Error fetching article: {str(e)}")
+        except Exception as e:
+            raise ArticleFetchError(f"Unexpected error fetching article: {str(e)}")
+
+    async def process_article_text(self, text: str) -> Dict[str, Any]:
+        try:
+            tasks = [
+                self._generate_summary(text),
+                self._extract_terminology(text),
+                self._assess_quality(text)
+            ]
+            summary, terminology, quality_assessment = await asyncio.gather(*tasks)
+            
+            return {
+                "summary": summary,
+                "terminology": terminology,
+                "quality_assessment": quality_assessment
+            }
+        except Exception as e:
+            raise ArticleAnalysisError(f"Error processing article text: {str(e)}")
+
+    async def _generate_summary(self, text: str) -> str:
+        response = await self.openai_client.chat.completions.create(
+            model=self.settings.openai_model,
+            messages=[
+                {"role": "system", "content": "You are a medical content summarizer."},
+                {"role": "user", "content": f"Summarize this medical article:\n\n{text}"}
+            ]
+        )
+        return response.choices[0].message.content
+
+    async def _extract_terminology(self, text: str) -> str:
+        response = await self.openai_client.chat.completions.create(
+            model=self.settings.openai_model,
+            messages=[
+                {"role": "system", "content": "Extract and explain medical terminology."},
+                {"role": "user", "content": f"Extract and explain key medical terms from:\n\n{text}"}
+            ]
+        )
+        return response.choices[0].message.content
+
+    async def _assess_quality(self, text: str) -> str:
+        response = await self.openai_client.chat.completions.create(
+            model=self.settings.openai_model,
+            messages=[
+                {"role": "system", "content": "Assess medical study quality and methodology."},
+                {"role": "user", "content": f"Assess the quality and methodology of this study:\n\n{text}"}
+            ]
+        )
+        return response.choices[0].message.content
+
+    async def close(self):
+        await self.session.close()
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 # Initialize FastAPI app
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    app.state.article_service = ArticleService(get_settings())
+    yield
+    # Shutdown
+    await app.state.article_service.close()
+
 app = FastAPI(
     title="Health Article MCP",
-    description="Multi-Agent System for Processing Health Articles",
-    version="1.0.0"
+    description="Medical Content Processing API for health articles",
+    version="1.0.0",
+    lifespan=lifespan
 )
 
-# Initialize OpenAI client
-api_key = os.getenv("OPENAI_API_KEY")
-if not api_key and not os.getenv("TESTING"):
-    raise ValueError("OPENAI_API_KEY environment variable is not set")
-
-openai_client = OpenAI(api_key=api_key or "test-key")
-app.state.openai_client = openai_client
-
-# Configure rate limits
-RATE_LIMIT_MAX_REQUESTS = int(os.getenv("RATE_LIMIT_MAX_REQUESTS", "60"))
-RATE_LIMIT_WINDOW = int(os.getenv("RATE_LIMIT_WINDOW", "60"))
-
-# Configure cache TTL (in seconds)
-CACHE_TTL = int(os.getenv("CACHE_TTL", "3600"))  # 1 hour default
-
-def create_mcp_message(
-    conversation_id: str,
-    sender_agent: str,
-    recipient_agent: str,
-    payload_type: str,
-    payload: dict
-) -> MCPMessage:
-    """Helper function to create MCP messages"""
-    return MCPMessage(
-        conversation_id=conversation_id,
-        sender_agent=sender_agent,
-        recipient_agent=recipient_agent,
-        payload_type=payload_type,
-        payload=payload
-    )
-
-@retry_with_backoff(
-    max_retries=3,
-    retryable_exceptions=(RetryableError, NetworkError)
-)
-@cached(ttl=CACHE_TTL)
-async def process_url(message: MCPMessage) -> MCPMessage:
-    """Handle URL processing by the ArticleFetcher agent"""
+@app.post("/workflow/process")
+async def process_workflow(
+    request: Request,
+    article_request: ArticleRequest,
+    settings: Settings = Depends(get_settings)
+):
+    request_id = str(uuid.uuid4())
+    logger.info(f"Processing request {request_id}")
+    
     try:
-        # Validate URL before processing
-        url = message.payload["url"]
-        validate_url(url)
-        
-        article_text = fetch_article(url)
-        return create_mcp_message(
-            conversation_id=message.conversation_id,
-            sender_agent="ArticleFetcherAgent",
-            recipient_agent="SummarizerAgent",
-            payload_type="article_text",
-            payload={"text": article_text}
-        )
+        # Get content from URL or use provided text
+        if article_request.url:
+            content = await app.state.article_service.fetch_article(article_request.url)
+        else:
+            content = article_request.text
+
+        if not content:
+            raise HTTPException(status_code=400, detail="Empty article content")
+
+        # Process the article
+        result = await app.state.article_service.process_article_text(content)
+        logger.info(f"Successfully processed request {request_id}")
+        return result
+
     except ArticleFetchError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        logger.error(f"Article fetch error for request {request_id}: {str(e)}")
+        raise HTTPException(status_code=404, detail=str(e))
+    except ArticleAnalysisError as e:
+        logger.error(f"Article analysis error for request {request_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
     except ValueError as e:
+        logger.error(f"Validation error for request {request_id}: {str(e)}")
         raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error in process_url: {str(e)}")
-        raise NetworkError(str(e))
-
-@retry_with_backoff(max_retries=2)
-@cached(ttl=CACHE_TTL)
-async def process_article_text(message: MCPMessage) -> MCPMessage:
-    """Handle article text processing by the Summarizer agent"""
-    try:
-        logger.info(f"Processing article text with OpenAI client: {app.state.openai_client}")
-        summary = summarize_text(message.payload["text"], app.state.openai_client)
-        return create_mcp_message(
-            conversation_id=message.conversation_id,
-            sender_agent="SummarizerAgent",
-            recipient_agent="ResponseFormatterAgent",
-            payload_type="summary",
-            payload={"summary": summary}
-        )
-    except Exception as e:
-        logger.error(f"Error in process_article_text: {str(e)}")
-        raise RetryableError(str(e))
-
-@retry_with_backoff(max_retries=2)
-@cached(ttl=CACHE_TTL)
-async def process_terminology(message: MCPMessage) -> MCPMessage:
-    """Handle terminology explanation by the Terminology Explainer agent"""
-    try:
-        terminology_dict = explain_terminology(message.payload["text"], app.state.openai_client)
-        return create_mcp_message(
-            conversation_id=message.conversation_id,
-            sender_agent="TerminologyExplainerAgent",
-            recipient_agent="ResponseFormatterAgent",
-            payload_type="terminology",
-            payload={"terminology": terminology_dict}
-        )
-    except Exception as e:
-        logger.error(f"Error in process_terminology: {str(e)}")
-        raise RetryableError(str(e))
-
-@retry_with_backoff(max_retries=2)
-@cached(ttl=CACHE_TTL)
-async def process_quality_assessment(message: MCPMessage) -> MCPMessage:
-    """Handle study quality assessment by the Quality Assessor agent"""
-    try:
-        quality_assessment = assess_study_quality(message.payload["text"], app.state.openai_client)
-        return create_mcp_message(
-            conversation_id=message.conversation_id,
-            sender_agent="QualityAssessorAgent",
-            recipient_agent="ResponseFormatterAgent",
-            payload_type="quality_assessment",
-            payload={"assessment": quality_assessment}
-        )
-    except Exception as e:
-        logger.error(f"Error in process_quality_assessment: {str(e)}")
-        raise RetryableError(str(e))
-
-@app.post("/workflow/process", response_model=WorkflowResponse)
-@rate_limit(max_requests=RATE_LIMIT_MAX_REQUESTS, time_window=RATE_LIMIT_WINDOW)
-async def process_workflow(request: Request, message: MCPMessage) -> WorkflowResponse:
-    try:
-        # Log received message
-        logger.info(f"Received message: {message.model_dump_json(indent=2)}")
-        
-        # Process based on payload_type
-        if message.payload_type != "url":
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unsupported payload type: {message.payload_type}"
-            )
-            
-        # First step: Fetch article
-        fetcher_result = await process_url(message)
-        
-        # Second step: Generate summary
-        summarizer_result = await process_article_text(fetcher_result)
-        
-        # Third step: Explain terminology
-        terminology_result = await process_terminology(fetcher_result)
-        
-        # Fourth step: Assess study quality
-        quality_result = await process_quality_assessment(fetcher_result)
-        
-        # Return the combined results
-        return WorkflowResponse(
-            success=True,
-            message="Article processed successfully",
-            data={
-                "message_id": str(summarizer_result.message_id),
-                "summary": summarizer_result.payload["summary"],
-                "terminology": terminology_result.payload["terminology"],
-                "quality_assessment": quality_result.payload["assessment"]
-            }
-        )
-            
-    except Exception as e:
-        raise handle_api_error(e)
+        logger.error(f"Unexpected error for request {request_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000) 
+    uvicorn.run(app, host="0.0.0.0", port=8000)

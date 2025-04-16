@@ -1,333 +1,119 @@
 import pytest
 from fastapi.testclient import TestClient
-import json
-from unittest.mock import patch
-from agents import ArticleFetchError
-from main import fetch_article, summarize_text
-from uuid import uuid4
+from main import app, ArticleFetchError, ArticleProcessingError, ArticleAnalysisError
 
-def test_process_workflow_valid_url(client, test_url):
-    """Test processing workflow with a valid URL"""
-    with patch('main.fetch_article') as mock_fetch:
-        mock_fetch.return_value = "Test article content"
-        response = client.post(
-            "/workflow/process",
-            json={
-                "message_id": str(uuid4()),
-                "conversation_id": str(uuid4()),
-                "sender_agent": "UserAgent",
-                "recipient_agent": "ArticleFetcherAgent",
-                "timestamp": "2024-03-15T10:00:00Z",
-                "payload_type": "url",
-                "payload": {"url": test_url}
-            }
-        )
-        assert response.status_code == 200
-        data = response.json()
-        assert data["success"] is True
-        assert "summary" in data["data"]
+class MockArticleService:
+    def __init__(self):
+        self.mock_summary = "This is a mock summary"
+        self.mock_terminology = "Term 1: Definition 1\nTerm 2: Definition 2"
+        self.mock_quality = "Quality Score: 8/10. This is a high-quality study."
 
-def test_process_workflow_invalid_url(client):
-    """Test processing workflow with an invalid URL"""
-    response = client.post(
-        "/workflow/process",
-        json={
-            "message_id": str(uuid4()),
-            "conversation_id": str(uuid4()),
-            "sender_agent": "UserAgent",
-            "recipient_agent": "ArticleFetcherAgent",
-            "timestamp": "2024-03-15T10:00:00Z",
-            "payload_type": "url",
-            "payload": {"url": "invalid_url"}
+    async def fetch_article(self, url: str) -> str:
+        if "not-found" in url:
+            raise ArticleFetchError("Article not found")
+        if "error" in url:
+            raise ArticleProcessingError("Error processing article")
+        return "Mock article content"
+
+    async def process_article_text(self, text: str) -> dict:
+        if "error" in text.lower():
+            raise ArticleAnalysisError("Error analyzing article")
+        return {
+            "summary": self.mock_summary,
+            "terminology": self.mock_terminology,
+            "quality_assessment": self.mock_quality
         }
-    )
-    assert response.status_code == 400
 
-def test_process_workflow_404_url(client, test_urls):
-    """Test processing workflow with a URL that returns 404"""
-    with patch('main.fetch_article') as mock_fetch:
-        mock_fetch.side_effect = ArticleFetchError("Article not found: 404 Client Error: Not Found for url: " + test_urls["not_found"])
-        response = client.post(
-            "/workflow/process",
-            json={
-                "message_id": str(uuid4()),
-                "conversation_id": str(uuid4()),
-                "sender_agent": "UserAgent",
-                "recipient_agent": "ArticleFetcherAgent",
-                "timestamp": "2024-03-15T10:00:00Z",
-                "payload_type": "url",
-                "payload": {"url": test_urls["not_found"]}
-            }
-        )
-        assert response.status_code == 400
-        error_data = response.json()
-        assert "Article not found" in error_data["detail"]
-        assert "404" in error_data["detail"]
+    async def close(self):
+        pass
 
-def test_mocked_workflow(client, test_urls):
-    """Test the entire workflow with mocked functions"""
-    with patch('main.fetch_article') as mock_fetch:
-        mock_fetch.return_value = "Test article content"
-        response = client.post(
-            "/workflow/process",
-            json={
-                "message_id": str(uuid4()),
-                "conversation_id": str(uuid4()),
-                "sender_agent": "UserAgent",
-                "recipient_agent": "ArticleFetcherAgent",
-                "timestamp": "2024-03-15T10:00:00Z",
-                "payload_type": "url",
-                "payload": {"url": test_urls["clinical_trial"]}
-            }
-        )
-        assert response.status_code == 200
-        data = response.json()
-        assert data["success"] is True
-        assert "summary" in data["data"]
-        assert data["data"]["summary"] == "Test article summary"
+@pytest.fixture
+def mock_article_service():
+    return MockArticleService()
 
-def test_invalid_payload_type(client, test_urls):
-    """Test invalid payload type"""
-    response = client.post(
+@pytest.fixture
+def test_client(mock_article_service):
+    app.state.article_service = mock_article_service
+    return TestClient(app)
+
+def test_process_workflow_valid_url(test_client):
+    response = test_client.post(
         "/workflow/process",
-        json={
-            "message_id": str(uuid4()),
-            "conversation_id": str(uuid4()),
-            "sender_agent": "UserAgent",
-            "recipient_agent": "ArticleFetcherAgent",
-            "timestamp": "2024-03-15T10:00:00Z",
-            "payload_type": "invalid",
-            "payload": {"url": test_urls["news"]}
-        }
+        json={"url": "https://www.nejm.org/valid-article"}
     )
-    assert response.status_code == 400
-
-def test_invalid_json(client):
-    """Test invalid JSON request"""
-    response = client.post("/workflow/process", json={})
-    assert response.status_code == 422
-
-def test_summarizer_consistency(client, test_urls):
-    """Test that summarizer produces consistent output for the same input"""
-    test_article = """
-    A new study shows that regular exercise can significantly reduce the risk of heart disease.
-    The research, conducted over 5 years with 10,000 participants, demonstrated that
-    30 minutes of daily moderate exercise led to a 50% reduction in cardiovascular events.
-    The study also found that the benefits were consistent across all age groups.
-    """
-    
-    with patch('main.fetch_article') as mock_fetch:
-        mock_fetch.return_value = test_article
-        
-        # First request with Harvard URL
-        response1 = client.post(
-            "/workflow/process",
-            json={
-                "message_id": str(uuid4()),
-                "conversation_id": str(uuid4()),
-                "sender_agent": "UserAgent",
-                "recipient_agent": "ArticleFetcherAgent",
-                "timestamp": "2024-03-15T10:00:00Z",
-                "payload_type": "url",
-                "payload": {"url": test_urls["news"]}
-            }
-        )
-        
-        # Second request with same content but different URL
-        response2 = client.post(
-            "/workflow/process",
-            json={
-                "message_id": str(uuid4()),
-                "conversation_id": str(uuid4()),
-                "sender_agent": "UserAgent",
-                "recipient_agent": "ArticleFetcherAgent",
-                "timestamp": "2024-03-15T10:00:00Z",
-                "payload_type": "url",
-                "payload": {"url": test_urls["research"]}
-            }
-        )
-        
-        assert response1.status_code == 200
-        assert response2.status_code == 200
-        
-        summary1 = response1.json()["data"]["summary"]
-        summary2 = response2.json()["data"]["summary"]
-        
-        # Check that summaries are identical for same input
-        assert summary1 == summary2
-        # Check that summary contains key information
-        assert "exercise" in summary1.lower()
-        assert "heart disease" in summary1.lower() or "cardiovascular" in summary1.lower()
-
-def test_summarizer_different_content_types(client, test_urls):
-    """Test summarizer handles different types of medical content appropriately"""
-    test_articles = {
-        "research_study": """
-        A randomized controlled trial of 500 patients showed that the new drug reduced symptoms
-        by 60% compared to placebo. The p-value was <0.001, indicating statistical significance.
-        Side effects were minimal, with only 5% reporting mild gastrointestinal discomfort.
-        """,
-        "health_news": """
-        The CDC has updated its guidelines for COVID-19 prevention. The new recommendations
-        emphasize the importance of proper ventilation and mask-wearing in high-risk settings.
-        These changes reflect recent research on airborne transmission.
-        """,
-        "medical_advice": """
-        To maintain healthy blood pressure, doctors recommend reducing salt intake,
-        exercising regularly, and managing stress. These lifestyle changes can be as
-        effective as medication for some patients with mild hypertension.
-        """
-    }
-    
-    url_mapping = {
-        "research_study": test_urls["research"],
-        "health_news": test_urls["guidelines"],
-        "medical_advice": test_urls["medical_advice"]
-    }
-    
-    summaries = {}
-    for content_type, article in test_articles.items():
-        with patch('main.fetch_article') as mock_fetch:
-            mock_fetch.return_value = article
-            response = client.post(
-                "/workflow/process",
-                json={
-                    "message_id": str(uuid4()),
-                    "conversation_id": str(uuid4()),
-                    "sender_agent": "UserAgent",
-                    "recipient_agent": "ArticleFetcherAgent",
-                    "timestamp": "2024-03-15T10:00:00Z",
-                    "payload_type": "url",
-                    "payload": {"url": url_mapping[content_type]}
-                }
-            )
-            
-            assert response.status_code == 200
-            summary = response.json()["data"]["summary"]
-            summaries[content_type] = summary
-            
-            # Check content-specific key elements
-            if content_type == "research_study":
-                assert any(term in summary.lower() for term in ["trial", "study", "patients", "results"])
-            elif content_type == "health_news":
-                assert any(term in summary.lower() for term in ["cdc", "guidelines", "recommendations"])
-            elif content_type == "medical_advice":
-                assert any(term in summary.lower() for term in ["recommend", "advice", "should", "can"])
-
-def test_process_workflow_with_terminology(client, test_urls):
-    """Test that the workflow processes terminology correctly"""
-    url = test_urls["clinical_trial"]
-    message_id = str(uuid4())
-    conversation_id = str(uuid4())
-    
-    response = client.post(
-        "/workflow/process",
-        json={
-            "message_id": message_id,
-            "conversation_id": conversation_id,
-            "sender_agent": "UserAgent",
-            "recipient_agent": "ArticleFetcherAgent",
-            "payload_type": "url",
-            "payload": {"url": url}
-        }
-    )
-    
     assert response.status_code == 200
-    data = response.json()["data"]
-    assert "terminology" in data
-    terminology = data["terminology"]
-    assert isinstance(terminology, dict)
-    assert len(terminology) > 0
-    assert all(isinstance(k, str) and isinstance(v, str) for k, v in terminology.items())
-
-def test_process_workflow_with_quality_assessment(client, test_urls):
-    """Test that the workflow processes quality assessment correctly"""
-    url = test_urls["clinical_trial"]
-    message_id = str(uuid4())
-    conversation_id = str(uuid4())
-    
-    response = client.post(
-        "/workflow/process",
-        json={
-            "message_id": message_id,
-            "conversation_id": conversation_id,
-            "sender_agent": "UserAgent",
-            "recipient_agent": "ArticleFetcherAgent",
-            "payload_type": "url",
-            "payload": {"url": url}
-        }
-    )
-    
-    assert response.status_code == 200
-    data = response.json()["data"]
-    assert "quality_assessment" in data
-    assessment = data["quality_assessment"]
-    assert isinstance(assessment, dict)
-    
-    # Check required fields
-    required_fields = [
-        "study_design", "sample_quality", "statistical_rigor",
-        "bias_assessment", "transparency", "evidence_level",
-        "overall_score", "key_limitations", "recommendations"
-    ]
-    for field in required_fields:
-        assert field in assessment
-    
-    # Check rating fields
-    rating_fields = [
-        "study_design", "sample_quality", "statistical_rigor",
-        "bias_assessment", "transparency", "overall_score"
-    ]
-    for field in rating_fields:
-        assert "rating" in assessment[field]
-        assert "explanation" in assessment[field]
-    
-    # Check evidence level
-    assert "level" in assessment["evidence_level"]
-    assert "explanation" in assessment["evidence_level"]
-    
-    # Check lists
-    assert isinstance(assessment["key_limitations"], list)
-    assert isinstance(assessment["recommendations"], list)
-
-def test_full_workflow_integration(client, test_urls):
-    """Test that all components of the workflow work together"""
-    url = test_urls["clinical_trial"]
-    message_id = str(uuid4())
-    conversation_id = str(uuid4())
-    
-    response = client.post(
-        "/workflow/process",
-        json={
-            "message_id": message_id,
-            "conversation_id": conversation_id,
-            "sender_agent": "UserAgent",
-            "recipient_agent": "ArticleFetcherAgent",
-            "payload_type": "url",
-            "payload": {"url": url}
-        }
-    )
-    
-    assert response.status_code == 200
-    data = response.json()["data"]
-    
-    # Check all components are present
-    assert "message_id" in data
+    data = response.json()
     assert "summary" in data
     assert "terminology" in data
     assert "quality_assessment" in data
-    
-    # Check summary
-    assert isinstance(data["summary"], str)
-    assert len(data["summary"]) > 0
-    
-    # Check terminology
-    assert isinstance(data["terminology"], dict)
-    assert len(data["terminology"]) > 0
-    
-    # Check quality assessment
-    assessment = data["quality_assessment"]
-    assert isinstance(assessment, dict)
-    assert "overall_score" in assessment
-    assert "key_limitations" in assessment
-    assert "recommendations" in assessment 
+
+def test_process_workflow_invalid_url(test_client):
+    response = test_client.post(
+        "/workflow/process",
+        json={"url": "not-a-url"}
+    )
+    assert response.status_code == 422
+    data = response.json()
+    assert "detail" in data
+    assert any("Invalid URL format" in error["msg"] for error in data["detail"])
+
+def test_process_workflow_not_found(test_client):
+    response = test_client.post(
+        "/workflow/process",
+        json={"url": "https://www.nejm.org/not-found-article"}
+    )
+    assert response.status_code == 404
+    data = response.json()
+    assert "detail" in data
+    assert "Article not found" in data["detail"]
+
+def test_process_workflow_server_error(test_client):
+    response = test_client.post(
+        "/workflow/process",
+        json={"url": "https://www.nejm.org/error-article"}
+    )
+    assert response.status_code == 500
+    data = response.json()
+    assert "detail" in data
+    assert "Internal server error" in data["detail"]
+
+def test_process_workflow_with_text(test_client):
+    response = test_client.post(
+        "/workflow/process",
+        json={"text": "Sample medical article text"}
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert "summary" in data
+    assert "terminology" in data
+    assert "quality_assessment" in data
+
+def test_process_workflow_no_content(test_client):
+    response = test_client.post(
+        "/workflow/process",
+        json={}
+    )
+    assert response.status_code == 422
+    data = response.json()
+    assert "detail" in data
+    assert any("Either url or text must be provided" in error["msg"] for error in data["detail"])
+
+def test_process_workflow_both_url_and_text(test_client):
+    response = test_client.post(
+        "/workflow/process",
+        json={"url": "https://www.nejm.org/article", "text": "Sample text"}
+    )
+    assert response.status_code == 422
+    data = response.json()
+    assert "detail" in data
+    assert any("Only one of url or text should be provided" in error["msg"] for error in data["detail"])
+
+def test_process_workflow_disallowed_domain(test_client):
+    response = test_client.post(
+        "/workflow/process",
+        json={"url": "https://disallowed-domain.com/article"}
+    )
+    assert response.status_code == 422
+    data = response.json()
+    assert "detail" in data
+    assert any("Domain not allowed" in error["msg"] and "Allowed domains:" in error["msg"] for error in data["detail"])

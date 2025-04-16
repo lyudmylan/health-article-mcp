@@ -59,6 +59,28 @@ export RATE_LIMIT_WINDOW='60'         # Optional: window in seconds
 export CACHE_TTL='3600'              # Optional: cache TTL in seconds
 ```
 
+## Redis Configuration
+
+The application uses Redis for rate limiting and caching. Make sure you have Redis installed and running locally, or set the `REDIS_URL` environment variable to point to your Redis instance.
+
+### Local Redis Setup
+
+1. Install Redis:
+   - macOS: `brew install redis`
+   - Linux: `sudo apt-get install redis-server`
+   - Windows: Download from [Redis Windows](https://github.com/microsoftarchive/redis/releases)
+
+2. Start Redis:
+   - macOS/Linux: `redis-server`
+   - Windows: Start the Redis service
+
+### Environment Variables
+
+- `REDIS_URL`: Redis connection URL (default: "redis://localhost:6379")
+- `RATE_LIMIT_MAX_REQUESTS`: Maximum requests per minute (default: 60)
+- `RATE_LIMIT_WINDOW`: Time window in seconds (default: 60)
+- `CACHE_TTL`: Cache time-to-live in seconds (default: 3600)
+
 ## Usage
 
 1. Start the server:
