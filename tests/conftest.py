@@ -4,11 +4,12 @@ from unittest.mock import AsyncMock, MagicMock
 from fastapi.testclient import TestClient
 from httpx import AsyncClient
 import json
+from typing import AsyncGenerator, Generator
 from main import app, ArticleService, get_settings
 
 @pytest_asyncio.fixture
-async def mock_redis():
-    mock = MagicMock()
+async def mock_redis() -> AsyncMock:
+    mock = AsyncMock()
     mock.zcount.return_value = 0  # Default: no requests made
     mock.get.return_value = None  # Default: no cache hit
     mock.zadd = AsyncMock()
@@ -16,13 +17,13 @@ async def mock_redis():
     return mock
 
 @pytest_asyncio.fixture
-async def mock_openai():
+async def mock_openai() -> AsyncMock:
     mock = AsyncMock()
     mock.chat.completions.create.return_value.choices[0].message.content = "Mocked response"
     return mock
 
 @pytest.fixture
-def mock_article_service(mock_openai):
+def mock_article_service(mock_openai) -> ArticleService:
     service = MagicMock(spec=ArticleService)
     service.fetch_article = AsyncMock()
     service.process_article_text = AsyncMock()
@@ -30,14 +31,12 @@ def mock_article_service(mock_openai):
     return service
 
 @pytest.fixture
-def test_client(mock_article_service, mock_redis):
+def test_client(mock_article_service) -> TestClient:
     app.state.article_service = mock_article_service
-    app.state.redis = mock_redis
-    with TestClient(app) as client:
-        yield client
+    return TestClient(app)
 
 @pytest_asyncio.fixture
-def test_article_content():
+def test_article_content() -> str:
     return """
     Abstract
     Background: This is a test medical article abstract.

@@ -10,11 +10,15 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class ArticleFetchError(Exception):
-    """Raised when article fetching fails"""
+    """Raised when article fetching fails.
+    
+    This exception is raised when there are issues fetching an article,
+    such as network errors, 404 errors, or invalid content.
+    """
     pass
 
 class RetryableError(Exception):
-    """Base class for errors that can be retried"""
+    """Base class for errors that can be retried."""
     pass
 
 class NetworkError(RetryableError):

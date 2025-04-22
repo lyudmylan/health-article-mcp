@@ -61,13 +61,14 @@ class RateLimiter:
             await pipe.zadd(key, {str(current_time): current_time})
             
             # Get count of recent requests
-            request_count = await pipe.zcard(key)
+            await pipe.zcard(key)
             
             # Set expiry on the key
             await pipe.expire(key, self.time_window)
             
-            # Execute pipeline
-            await pipe.execute()
+            # Execute pipeline and get results
+            results = await pipe.execute()
+            request_count = results[1]  # zcard result
 
         if request_count > self.max_requests:
             logger.warning(f"Rate limit exceeded for client {client_id}")
@@ -76,6 +77,18 @@ class RateLimiter:
             )
         
         return True
+
+    async def aclose(self):
+        """Close Redis connection"""
+        if hasattr(self.redis_client, 'aclose'):
+            await self.redis_client.aclose()
+        else:
+            await self.redis_client.close()
+    
+    # For backward compatibility
+    async def close(self):
+        """Deprecated: Use aclose() instead"""
+        await self.aclose()
 
 class Cache:
     """Caching implementation using Redis"""
@@ -96,11 +109,20 @@ class Cache:
         if self._redis is None:
             self._redis = await aioredis.from_url(self.redis_url)
     
-    async def close(self):
+    async def aclose(self):
         """Close Redis connection"""
         if self._redis is not None:
-            await self._redis.close()
+            # Handle both redis-py and aioredis clients
+            if hasattr(self._redis, 'aclose'):
+                await self._redis.aclose()
+            else:
+                await self._redis.close()
             self._redis = None
+    
+    # For backward compatibility
+    async def close(self):
+        """Deprecated: Use aclose() instead"""
+        await self.aclose()
     
     def get_cache_key(self, key: str) -> str:
         """Generate cache key with prefix"""

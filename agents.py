@@ -4,6 +4,7 @@ import requests
 from bs4 import BeautifulSoup
 from openai import AsyncOpenAI
 from error_handlers import ArticleFetchError, RetryableError
+import aiohttp
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -23,23 +24,25 @@ async def fetch_article(url: str) -> str:
         ArticleFetchError: If article cannot be fetched
     """
     try:
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # Remove unwanted elements
-        for element in soup(['script', 'style', 'nav', 'header', 'footer']):
-            element.decompose()
-        
-        # Get main content
-        article = soup.find('article') or soup.find('main') or soup.find('body')
-        if not article:
-            raise ArticleFetchError("Could not find article content")
-            
-        return article.get_text(separator='\n', strip=True)
-        
-    except requests.RequestException as e:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=10) as response:
+                response.raise_for_status()
+                html = await response.text()
+                
+                soup = BeautifulSoup(html, 'html.parser')
+                
+                # Remove unwanted elements
+                for element in soup(['script', 'style', 'nav', 'header', 'footer']):
+                    element.decompose()
+                
+                # Get main content
+                article = soup.find('article') or soup.find('main') or soup.find('body')
+                if not article:
+                    raise ArticleFetchError("Could not find article content")
+                    
+                return article.get_text(separator='\n', strip=True)
+                
+    except aiohttp.ClientError as e:
         raise ArticleFetchError(f"Failed to fetch article: {str(e)}")
 
 async def summarize_text(text: str, client: AsyncOpenAI) -> str:

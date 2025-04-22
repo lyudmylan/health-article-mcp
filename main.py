@@ -1,30 +1,42 @@
 import logging
 import os
 import asyncio
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from fastapi import FastAPI, HTTPException, Request, Depends
 from pydantic import BaseModel, field_validator, model_validator
 from pydantic_settings import BaseSettings
 import aiohttp
 import json
-from openai import AsyncOpenAI
+import openai
 from bs4 import BeautifulSoup
 import validators
 from functools import lru_cache
 import uuid
 from contextlib import asynccontextmanager
+from openai.error import OpenAIError
 
 # Custom exceptions
 class ArticleProcessingError(Exception):
-    """Base exception for article processing errors"""
+    """Base exception class for article processing errors.
+    
+    This is the parent class for all article-related exceptions in the system.
+    """
     pass
 
 class ArticleFetchError(ArticleProcessingError):
-    """Exception raised when fetching article fails"""
+    """Exception raised when article fetching fails.
+    
+    This exception is raised when there are issues retrieving an article,
+    such as network errors, 404s, or invalid content.
+    """
     pass
 
 class ArticleAnalysisError(ArticleProcessingError):
-    """Exception raised when analyzing article fails"""
+    """Exception raised when article analysis fails.
+    
+    This exception is raised when there are issues processing or analyzing
+    the article content, such as AI processing errors or invalid content format.
+    """
     pass
 
 # Configuration
@@ -33,7 +45,7 @@ class Settings(BaseSettings):
     openai_model: str = "gpt-4"
     request_timeout: int = 30
     max_content_length: int = 100000
-    allowed_domains: list = [
+    allowed_domains: List[str] = [
         "nejm.org",
         "thelancet.com",
         "jamanetwork.com",
@@ -46,7 +58,7 @@ class Settings(BaseSettings):
         env_file = ".env"
 
 @lru_cache
-def get_settings():
+def get_settings() -> Settings:
     return Settings()
 
 # Models
@@ -62,10 +74,8 @@ class ArticleRequest(BaseModel):
         if not validators.url(v):
             raise ValueError("Invalid URL format")
         
-        # Get settings without dependency injection
         settings = get_settings()
         
-        # Check domain allowlist
         domain = v.split('/')[2] if len(v.split('/')) > 2 else ""
         if not any(allowed in domain for allowed in settings.allowed_domains):
             raise ValueError(f"Domain not allowed. Allowed domains: {', '.join(settings.allowed_domains)}")
@@ -82,7 +92,6 @@ class ArticleRequest(BaseModel):
         if url and text:
             raise ValueError("Only one of url or text should be provided")
         
-        # Check content length
         if text and len(text) > get_settings().max_content_length:
             raise ValueError(f"Text content exceeds maximum length of {get_settings().max_content_length} characters")
         
@@ -90,9 +99,9 @@ class ArticleRequest(BaseModel):
 
 # Services
 class ArticleService:
-    def __init__(self, settings: Settings = Depends(get_settings)):
+    def __init__(self, settings: Settings = Depends(get_settings)) -> None:
         self.settings = settings
-        self.openai_client = AsyncOpenAI(api_key=settings.openai_api_key)
+        openai.api_key = settings.openai_api_key
         timeout = aiohttp.ClientTimeout(total=settings.request_timeout)
         self.session = aiohttp.ClientSession(timeout=timeout)
 
@@ -113,7 +122,7 @@ class ArticleService:
         except Exception as e:
             raise ArticleFetchError(f"Unexpected error fetching article: {str(e)}")
 
-    async def process_article_text(self, text: str) -> Dict[str, Any]:
+    async def process_article_text(self, text: str) -> Dict[str, str]:
         try:
             tasks = [
                 self._generate_summary(text),
@@ -131,34 +140,34 @@ class ArticleService:
             raise ArticleAnalysisError(f"Error processing article text: {str(e)}")
 
     async def _generate_summary(self, text: str) -> str:
-        response = await self.openai_client.chat.completions.create(
+        completion: dict = await openai.ChatCompletion.acreate(
             model=self.settings.openai_model,
             messages=[
                 {"role": "system", "content": "You are a medical content summarizer."},
                 {"role": "user", "content": f"Summarize this medical article:\n\n{text}"}
             ]
         )
-        return response.choices[0].message.content
+        return completion['choices'][0]['message']['content']
 
     async def _extract_terminology(self, text: str) -> str:
-        response = await self.openai_client.chat.completions.create(
+        completion = await openai.ChatCompletion.acreate(
             model=self.settings.openai_model,
             messages=[
                 {"role": "system", "content": "Extract and explain medical terminology."},
                 {"role": "user", "content": f"Extract and explain key medical terms from:\n\n{text}"}
             ]
         )
-        return response.choices[0].message.content
+        return completion.choices[0].message.content
 
     async def _assess_quality(self, text: str) -> str:
-        response = await self.openai_client.chat.completions.create(
+        completion = await openai.ChatCompletion.acreate(
             model=self.settings.openai_model,
             messages=[
                 {"role": "system", "content": "Assess medical study quality and methodology."},
                 {"role": "user", "content": f"Assess the quality and methodology of this study:\n\n{text}"}
             ]
         )
-        return response.choices[0].message.content
+        return completion.choices[0].message.content
 
     async def close(self):
         await self.session.close()

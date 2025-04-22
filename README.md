@@ -202,6 +202,12 @@ TESTING=1 PYTHONPATH=. pytest tests/ -v
 4. Push to the branch (`git push origin feature/amazing-feature`)
 5. Open a Pull Request
 
+### Development Notes
+
+#### Redis Connection Handling
+The application uses `aclose()` for Redis connection cleanup (supported in redis-py >= 5.0.0). For backward compatibility, 
+the `close()` method is still available but will be removed in future versions.
+
 ## License
 
 This project is licensed under the MIT License - see the LICENSE file for details. 
